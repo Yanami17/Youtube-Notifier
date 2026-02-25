@@ -134,7 +134,7 @@ def show_notification(channel_name, stream):
 # Background Loop
 # =========================
 
-def run_single_check():
+def run_single_check(force_notify=False):
     global state
 
     for handle, channel_name in CHANNELS.items():
@@ -149,12 +149,14 @@ def run_single_check():
 
         last_video_id = state.get(handle)
 
-        if last_video_id != stream["video_id"]:
+        # Notify if new stream OR forced refresh
+        if force_notify or last_video_id != stream["video_id"]:
             print(f"{channel_name} went live!")
             show_notification(channel_name, stream)
 
             state[handle] = stream["video_id"]
             save_state(state)
+
 
 
 def checker_loop():
@@ -205,14 +207,12 @@ def run_tray():
         item("Exit", quit_app)
     )
 )
-
-
     icon.run()
+
 
 def refresh_now(icon, item):
     print("Manual refresh triggered.")
-    run_single_check()
-
+    run_single_check(force_notify=True)
 
 
 # =========================
