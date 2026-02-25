@@ -134,6 +134,29 @@ def show_notification(channel_name, stream):
 # Background Loop
 # =========================
 
+def run_single_check():
+    global state
+
+    for handle, channel_name in CHANNELS.items():
+
+        stream = check_live_status(handle)
+
+        if stream is None:
+            if state.get(handle) is not None:
+                state[handle] = None
+                save_state(state)
+            continue
+
+        last_video_id = state.get(handle)
+
+        if last_video_id != stream["video_id"]:
+            print(f"{channel_name} went live!")
+            show_notification(channel_name, stream)
+
+            state[handle] = stream["video_id"]
+            save_state(state)
+
+
 def checker_loop():
     global state
     global running
@@ -145,31 +168,11 @@ def checker_loop():
 
     while running:
         try:
-            for handle, channel_name in CHANNELS.items():
-
-                stream = check_live_status(handle)
-
-                if stream is None:
-                    if state.get(handle) is not None:
-                        state[handle] = None
-                        save_state(state)
-                    continue
-
-
-                last_video_id = state.get(handle)
-
-                if last_video_id != stream["video_id"]:
-                    print(f"{channel_name} went live!")
-                    show_notification(channel_name, stream)
-
-                    state[handle] = stream["video_id"]
-                    save_state(state)
-
+            run_single_check()
         except Exception as e:
             print("Error:", e)
 
-        time.sleep(CHECK_INTERVAL)
-
+    time.sleep(CHECK_INTERVAL)
 
 # =========================
 # Tray Icon
@@ -194,15 +197,22 @@ def quit_app(icon, item):
 
 def run_tray():
     icon = pystray.Icon(
-        "YouTubeNotifier",
-        create_image(),
-        "YouTube Live Notifier",
-        menu=pystray.Menu(
-            item("Exit", quit_app)
-        )
+    "YouTubeNotifier",
+    create_image(),
+    "YouTube Live Notifier",
+    menu=pystray.Menu(
+        item("Refresh Now", refresh_now),
+        item("Exit", quit_app)
     )
+)
+
 
     icon.run()
+
+def refresh_now(icon, item):
+    print("Manual refresh triggered.")
+    run_single_check()
+
 
 
 # =========================
