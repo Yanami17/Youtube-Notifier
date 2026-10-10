@@ -19,6 +19,7 @@ import sys
 
 ROOT = os.path.dirname(sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__))
 APP_NAME = "YouTubeNotifierApp"
+MUTEX_NAME = "Local\\YouTubeLiveNotifier.Singleton"   # keep in sync with notifier/config.py
 APP_EXE = os.path.join(ROOT, "bin", f"{APP_NAME}.exe")
 SPEC = os.path.join(ROOT, "app.spec")
 LOG = os.path.join(ROOT, "build.log")
@@ -26,7 +27,8 @@ NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 def _sources() -> list[str]:
-    return [os.path.join(ROOT, "main.py"), SPEC, *glob.glob(os.path.join(ROOT, "notifier", "*.py"))]
+    return [os.path.join(ROOT, "main.py"), SPEC, os.path.join(ROOT, "assets", "icon.ico"),
+            *glob.glob(os.path.join(ROOT, "notifier", "*.py"))]
 
 
 def _needs_build() -> bool:
@@ -54,11 +56,24 @@ def _build() -> bool:
                               creationflags=NO_WINDOW).returncode == 0
 
 
+def _already_running() -> bool:
+    """True if the app holds its single-instance mutex."""
+    kernel32 = ctypes.windll.kernel32
+    kernel32.OpenMutexW.restype = ctypes.c_void_p
+    handle = kernel32.OpenMutexW(0x00100000, False, MUTEX_NAME)   # SYNCHRONIZE
+    if handle:
+        kernel32.CloseHandle(ctypes.c_void_p(handle))
+    return bool(handle)
+
+
 def _message(text: str):
     ctypes.windll.user32.MessageBoxW(0, text, "YouTube Notifier", 0x40)
 
 
 def main():
+    if _already_running():            # a running exe is locked; don't rebuild or start a second copy
+        _message("YouTube Live Notifier is already running\n(look in the system tray).")
+        return
     if _needs_build() and not _build() and not os.path.exists(APP_EXE):
         _message(f"Build failed and no existing app found.\nSee {LOG}")
         return

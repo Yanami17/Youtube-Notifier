@@ -4,7 +4,10 @@ import sys
 # Built-in channels (handle -> display name). User channels live in channels.json.
 CHANNELS: dict[str, str] = {}
 
-CHECK_INTERVAL = 60  # seconds between live checks
+APP_NAME = "YouTube Live Notifier"
+MUTEX_NAME = "Local\\YouTubeLiveNotifier.Singleton"   # keep in sync with launcher.py
+RUN_VALUE_NAME = "YouTubeLiveNotifier"                 # HKCU\...\Run entry
+
 REQUEST_TIMEOUT = 10
 MAX_WORKERS = 8      # parallel channel checks
 
@@ -22,3 +25,5 @@ DATA_DIR = os.environ.get("YTN_DATA_DIR") or (
 )
 STATE_FILE = os.path.join(DATA_DIR, "state.json")
 CHANNELS_FILE = os.path.join(DATA_DIR, "channels.json")
+SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")
+LOG_FILE = os.path.join(DATA_DIR, "notifier.log")
