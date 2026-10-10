@@ -13,12 +13,13 @@ images; PhotoImages are only created on the UI thread.
 
 import ctypes
 import io
+import logging
+import os
 import queue
 import re
 import threading
 import tkinter as tk
 import tkinter.font as tkfont
-import traceback
 import webbrowser
 from ctypes import wintypes
 from datetime import datetime, timezone
@@ -26,7 +27,10 @@ from datetime import datetime, timezone
 import requests
 from PIL import Image, ImageDraw, ImageOps, ImageTk
 
+from . import settings
 from .icons import idle_icon
+
+log = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────
 #  Design tokens
@@ -54,7 +58,6 @@ F_MONO   = ("Consolas", 11)
 
 TOAST_W, TOAST_H = 400, 162
 TOAST_PAD = 14          # gap to screen edge / between toasts
-TOAST_LIFE = 8000       # ms before auto-dismiss (paused while hovered)
 TOAST_MAX = 4
 THUMB_W, THUMB_H = 144, 81
 TICK = 16               # animation frame, ms
@@ -104,7 +107,7 @@ def _ui_thread_main():
                 try:
                     fn()
                 except Exception:
-                    traceback.print_exc()
+                    log.exception("UI job failed")
         except queue.Empty:
             pass
         root.after(50, _poll)
@@ -163,7 +166,7 @@ def _format_elapsed(iso: str | None) -> str | None:
             dt = datetime.strptime(iso[:-3] + iso[-2:], "%Y-%m-%dT%H:%M:%S%z")
         secs = int((datetime.now(timezone.utc) - dt).total_seconds())
     except Exception as e:
-        print("Elapsed time error:", e)
+        log.warning("Elapsed time error: %s", e)
         return None
     if secs < 60:
         return "Just started"
@@ -181,12 +184,18 @@ def _parse_handle(text: str) -> str | None:
     return "@" + handle if re.fullmatch(r"[\w.\-·]{3,30}", handle) else None
 
 
-def _play_sound():
+def _play_sound(sound: str = "default", force: bool = False):
+    """sound: "default" (system beep), "none", or a path to a .wav file."""
+    if sound == "none" or not (force or settings.get("sound")):
+        return
     try:
         import winsound  # Windows-only
-        winsound.MessageBeep(winsound.MB_ICONASTERISK)
-    except Exception:
-        pass
+        if sound != "default":
+            winsound.PlaySound(sound, winsound.SND_FILENAME | winsound.SND_ASYNC)
+        else:
+            winsound.MessageBeep(winsound.MB_ICONASTERISK)
+    except Exception as e:
+        log.warning("Could not play sound %r: %s", sound, e)
 
 
 def _work_area(root) -> tuple[int, int, int, int]:
@@ -216,7 +225,7 @@ def _fetch_thumbnail(url: str) -> Image.Image | None:
                 img = Image.open(io.BytesIO(r.content)).convert("RGB")
                 return ImageOps.fit(img, (THUMB_W, THUMB_H), Image.LANCZOS)
         except Exception as e:
-            print(f"Thumbnail fetch error ({u}):", e)
+            log.warning("Thumbnail fetch error (%s): %s", u, e)
     return None
 
 
@@ -316,6 +325,83 @@ def _avatar(parent, name: str, bg, size=34) -> tk.Canvas:
 # ─────────────────────────────────────────────
 #  Dialog scaffold
 # ─────────────────────────────────────────────
+
+class _OnResult:
+    """Event-like adaptor so a nested dialog can report back via a callback instead of blocking."""
+
+    def __init__(self, fn):
+        self.holder = [None]
+        self._fn, self._done = fn, False
+
+    def is_set(self):
+        return self._done
+
+    def set(self):
+        self._done = True
+        self._fn(self.holder[0])
+
+
+class _Toggle(tk.Canvas):
+    """iOS-style on/off switch."""
+
+    def __init__(self, parent, value=False, bg=SURFACE, command=None):
+        super().__init__(parent, width=44, height=24, bg=bg, highlightthickness=0, bd=0, cursor="hand2")
+        self.value, self._command = bool(value), command
+        self.bind("<Button-1>", lambda _: self.toggle())
+        self._draw()
+
+    def _draw(self):
+        self.delete("all")
+        _rrect(self, 1, 1, 43, 23, 11, fill=ACCENT if self.value else SURFACE2, outline=BORDER)
+        x = 32 if self.value else 12
+        self.create_oval(x - 8, 4, x + 8, 20, fill="#ffffff", outline="")
+
+    def toggle(self):
+        self.value = not self.value
+        self._draw()
+        if self._command:
+            self._command(self.value)
+
+
+class _Segmented(tk.Frame):
+    """Row of mutually exclusive pill options: options = [(label, value), ...]."""
+
+    def __init__(self, parent, options, value, command=None):
+        super().__init__(parent, bg=SURFACE2, highlightthickness=1, highlightbackground=BORDER)
+        self.value, self._command, self._items = value, command, []
+        for label, val in options:
+            lbl = tk.Label(self, text=label, font=F_SMALL, bg=SURFACE2, fg=TEXT_DIM,
+                           padx=10, pady=5, cursor="hand2")
+            lbl.pack(side="left")
+            lbl.bind("<Button-1>", lambda _, v=val: self.select(v))
+            self._items.append((lbl, val))
+        self._paint()
+
+    def _paint(self):
+        for lbl, val in self._items:
+            on = val == self.value
+            lbl.config(bg=ACCENT if on else SURFACE2, fg="#fff" if on else TEXT_DIM)
+
+    def select(self, value):
+        if self._command:
+            value = self._command(value)    # the callback may veto or replace the choice
+        self.value = value
+        self._paint()
+
+
+def _setting_row(parent, text, hint=None):
+    """Label (+ optional hint) on the left; returns the frame to pack the control into on the right."""
+    row = tk.Frame(parent, bg=SURFACE)
+    row.pack(fill="x", pady=7)
+    left = tk.Frame(row, bg=SURFACE)
+    left.pack(side="left")
+    _label(left, text, F_BODY).pack(anchor="w")
+    if hint:
+        _label(left, hint, F_TINY, TEXT_DIM).pack(anchor="w")
+    right = tk.Frame(row, bg=SURFACE)
+    right.pack(side="right")
+    return right
+
 
 class _Dialog:
     """Modal window: header (title/subtitle) · body · footer. Reports one result."""
@@ -443,11 +529,12 @@ def _build_add_channel_dialog(event, holder):
 #  Remove / View channels
 # ─────────────────────────────────────────────
 
-def _build_channel_manager_dialog(channels: dict, default_channels: dict, mode: str, event, holder):
+def _build_channel_manager_dialog(channels: dict, default_channels: dict, mode: str,
+                                  get_options, on_save, event, holder):
     removing = mode == "remove"
     dlg = _Dialog(
-        "Remove Channel" if removing else "Monitored Channels",
-        "Select a channel to stop monitoring" if removing else f"{len(channels)} channel(s) active",
+        "Remove Channel" if removing else "Manage Channels",
+        "Select a channel to stop monitoring" if removing else f"{len(channels)} channel(s) · select one to edit its notifications",
         ACCENT if removing else INFO, event, holder)
     body = dlg.body
 
@@ -479,7 +566,7 @@ def _build_channel_manager_dialog(channels: dict, default_channels: dict, mode: 
             cv.yview_scroll(-1 * (e.delta // 120), "units")
     dlg.win.bind("<MouseWheel>", wheel)
 
-    remove_btn = None
+    remove_btn = settings_btn = None
 
     def paint(handle):
         r = rows[handle]
@@ -490,13 +577,25 @@ def _build_channel_manager_dialog(channels: dict, default_channels: dict, mode: 
         r["bar"].config(bg=ACCENT if chosen else colour)
 
     def select(handle):
-        if not removing:
-            return
         prev, selected[0] = selected[0], handle
         if prev in rows:
             paint(prev)
         paint(handle)
-        remove_btn.set_enabled(True)
+        (remove_btn or settings_btn).set_enabled(True)
+
+    def edit_settings():
+        handle = selected[0]
+        if not handle:
+            return
+
+        def saved(opts):
+            dlg.win.grab_set()
+            if opts is not None:
+                on_save(handle, opts)
+                build_rows()
+
+        res = _OnResult(saved)
+        _build_channel_settings_dialog(channels[handle], get_options(handle), res, res.holder)
 
     def build_rows(*_):
         for child in inner.winfo_children():
@@ -507,7 +606,7 @@ def _build_channel_manager_dialog(channels: dict, default_channels: dict, mode: 
             name = channels[handle]
             if q and q not in name.lower() and q not in handle.lower():
                 continue
-            row = tk.Frame(inner, bg=SURFACE, height=48, cursor="hand2" if removing else "arrow")
+            row = tk.Frame(inner, bg=SURFACE, height=48, cursor="hand2")
             row.pack(fill="x", pady=2)
             row.pack_propagate(False)
             bar = tk.Frame(row, bg=SURFACE, width=3)
@@ -521,6 +620,10 @@ def _build_channel_manager_dialog(channels: dict, default_channels: dict, mode: 
             h_lbl = _label(texts, handle, F_TINY, TEXT_DIM, anchor="w")
             h_lbl.pack(fill="x")
             widgets = [row, avatar, texts, n_lbl, h_lbl]
+            if get_options and not get_options(handle)["notify"]:
+                muted = _label(row, "MUTED", F_TINY, DANGER, padx=6)
+                muted.pack(side="right")
+                widgets.append(muted)
             if handle in default_channels:
                 tag = _label(row, "BUILT-IN", F_TINY, TEXT_DIM, padx=10)
                 tag.pack(side="right")
@@ -545,6 +648,97 @@ def _build_channel_manager_dialog(channels: dict, default_channels: dict, mode: 
         dlg.button("Cancel", lambda: dlg.finish(None), "ghost")
     else:
         dlg.button("Close", lambda: dlg.finish(None), "ghost")
+        settings_btn = dlg.button("Notification settings…", edit_settings, "primary")
+        settings_btn.set_enabled(False)
+    dlg.show()
+
+
+# ─────────────────────────────────────────────
+#  Settings dialogs
+# ─────────────────────────────────────────────
+
+def _with_current(options, current):
+    """Make sure a hand-edited value from settings.json still shows as an option."""
+    if all(v != current for _, v in options):
+        options = options + [(str(current), current)]
+    return options
+
+
+def _build_settings_dialog(current: dict, startup: bool, event, holder):
+    dlg = _Dialog("Settings", "Checking, notifications and startup", INFO, event, holder)
+    body = dlg.body
+
+    def seg(label, hint, options, key):
+        w = _Segmented(_setting_row(body, label, hint), _with_current(options, current[key]), current[key])
+        w.pack()
+        return w
+
+    def toggle(label, hint, value):
+        t = _Toggle(_setting_row(body, label, hint), value)
+        t.pack()
+        return t
+
+    interval = seg("Check every", "How often channels are polled",
+                   [("30 s", 30), ("1 min", 60), ("2 min", 120), ("5 min", 300)], "check_interval")
+    duration = seg("Toast stays for", None,
+                   [("5 s", 5), ("8 s", 8), ("15 s", 15), ("Until closed", 0)], "toast_seconds")
+    sound = toggle("Play a sound", None, current["sound"])
+    soon = toggle("Starting-soon alerts", "Warn before a scheduled stream begins", current["notify_upcoming"])
+    lead = seg("Warn me", None, [("5 min", 5), ("15 min", 15), ("30 min", 30)], "upcoming_lead_min")
+    boot = toggle("Start with Windows", None, startup)
+
+    def save():
+        dlg.finish({
+            "check_interval": interval.value, "toast_seconds": duration.value,
+            "sound": sound.value, "notify_upcoming": soon.value,
+            "upcoming_lead_min": lead.value, "startup": boot.value,
+        })
+
+    dlg.button("Save", save)
+    dlg.button("Cancel", lambda: dlg.finish(None), "ghost")
+    dlg.show()
+
+
+def _build_channel_settings_dialog(name: str, opts: dict, event, holder):
+    dlg = _Dialog(_ellipsize(name, 32), "Notification settings for this channel", INFO, event, holder)
+    body = dlg.body
+
+    live = _Toggle(_setting_row(body, "Notify when live", "Turn off to mute this channel"), opts["notify"])
+    live.pack()
+    soon = _Toggle(_setting_row(body, "Starting-soon alerts", None), opts["upcoming"])
+    soon.pack()
+
+    sound_value = [opts["sound"]]
+    custom_lbl = _label(body, "", F_TINY, TEXT_DIM, anchor="e")
+
+    def kind(v):
+        return v if v in ("default", "none") else "custom"
+
+    def show_custom():
+        custom_lbl.config(text=os.path.basename(sound_value[0]) if kind(sound_value[0]) == "custom" else "")
+
+    def choose(value):
+        if value == "custom":
+            from tkinter import filedialog
+            path = filedialog.askopenfilename(parent=dlg.win, title="Choose a .wav sound",
+                                              filetypes=[("WAV audio", "*.wav")])
+            if not path:
+                return kind(sound_value[0])
+            sound_value[0] = path
+        else:
+            sound_value[0] = value
+        show_custom()
+        _play_sound(sound_value[0], force=True)   # preview
+        return kind(sound_value[0])
+
+    _Segmented(_setting_row(body, "Sound", None),
+               [("Default", "default"), ("Silent", "none"), ("Custom…", "custom")],
+               kind(sound_value[0]), command=choose).pack()
+    custom_lbl.pack(fill="x")
+    show_custom()
+
+    dlg.button("Save", lambda: dlg.finish({"notify": live.value, "upcoming": soon.value, "sound": sound_value[0]}))
+    dlg.button("Cancel", lambda: dlg.finish(None), "ghost")
     dlg.show()
 
 
@@ -553,9 +747,11 @@ def _build_channel_manager_dialog(channels: dict, default_channels: dict, mode: 
 # ─────────────────────────────────────────────
 
 class _Toast:
-    def __init__(self, channel_name, title, url, viewers, start_time, thumb):
+    def __init__(self, channel_name, title, url, meta, thumb, badge):
         self.url = url
-        self.life = TOAST_LIFE
+        secs = settings.get("toast_seconds")
+        self.total_life = secs * 1000 if secs else None   # None: stay until dismissed
+        self.life = self.total_life
         self.hover = False
         self.closing = False
         self.x_off = float(TOAST_W + TOAST_PAD)   # slides in from the right
@@ -578,15 +774,17 @@ class _Toast:
         cv.create_image(0, 0, anchor="nw", image=self._photo)
 
         # LIVE pill over the thumbnail
-        _rrect(cv, 20, 14 + THUMB_H - 24, 66, 14 + THUMB_H - 8, 6, fill=ACCENT)
-        cv.create_text(43, 14 + THUMB_H - 16, text="● LIVE", fill="#fff", font=(FAMILY, 7, "bold"))
+        live = badge == "LIVE"
+        pill_w = 46 if live else 50
+        _rrect(cv, 20, 14 + THUMB_H - 24, 20 + pill_w, 14 + THUMB_H - 8, 6, fill=ACCENT if live else "#f59e0b")
+        cv.create_text(20 + pill_w / 2, 14 + THUMB_H - 16, text=("● " if live else "⏰ ") + badge,
+                       fill="#fff" if live else "#1a1a1d", font=(FAMILY, 7, "bold"))
 
         tx = 14 + THUMB_W + 14
         tw = TOAST_W - tx - 16
         cv.create_text(tx, 16, text=_ellipsize(channel_name, 30).upper(), fill=TEXT_DIM,
                        font=(FAMILY, 8, "bold"), anchor="nw")
         cv.create_text(tx, 34, text=_ellipsize(title, 54), fill=TEXT, font=F_BOLD, anchor="nw", width=tw)
-        meta = "  ·  ".join(filter(None, [_format_viewers(viewers), _format_elapsed(start_time)]))
         if meta:
             cv.create_text(tx, 14 + THUMB_H - 14, text=meta, fill=TEXT_DIM, font=F_TINY, anchor="nw")
 
@@ -597,7 +795,10 @@ class _Toast:
         cv.create_window(14 + self.watch._bw + 8, TOAST_H - 18, anchor="sw", window=self.dismiss)
 
         # Countdown bar
-        self.bar = cv.create_rectangle(14, TOAST_H - 8, TOAST_W - 14, TOAST_H - 6, fill=ACCENT, outline="")
+        self.bar = cv.create_rectangle(14, TOAST_H - 8, TOAST_W - 14, TOAST_H - 6, fill=ACCENT, outline="",
+                                       state="normal" if self.total_life else "hidden")
+        cv.config(cursor="hand2")
+        cv.bind("<Button-1>", lambda _: self._watch())   # clicking the card itself opens the stream
 
         win.bind("<Enter>", lambda _: setattr(self, "hover", True))
         win.bind("<Leave>", lambda _: setattr(self, "hover", False))
@@ -619,9 +820,9 @@ class _Toast:
         else:
             self.x_off += (0 - self.x_off) * 0.2
             self.alpha = min(1.0, self.alpha + 0.12)
-            if not self.hover and self.x_off < 2:
+            if self.total_life and not self.hover and self.x_off < 2:
                 self.life -= TICK
-                frac = max(0.0, self.life / TOAST_LIFE)
+                frac = max(0.0, self.life / self.total_life)
                 self.cv.coords(self.bar, 14, TOAST_H - 8, 14 + (TOAST_W - 28) * frac, TOAST_H - 6)
                 if self.life <= 0:
                     self.closing = True
@@ -665,9 +866,9 @@ def _tick():
         _ticking = False
 
 
-def _build_live_toast(channel_name, title, url, viewers, start_time, thumb):
+def _build_live_toast(channel_name, title, url, meta, thumb, badge):
     global _ticking
-    toast = _Toast(channel_name, title, url, viewers, start_time, thumb)
+    toast = _Toast(channel_name, title, url, meta, thumb, badge)
     _toasts.append(toast)
     for old in _toasts[:-TOAST_MAX]:
         old.close()
@@ -696,24 +897,33 @@ def open_add_channel_dialog() -> str | None:
 
 def open_remove_channel_dialog(channels: dict, default_channels: dict) -> str | None:
     """Blocking — returns the handle selected for removal, or None if cancelled."""
-    return _run_dialog(_build_channel_manager_dialog, channels, default_channels, "remove")
+    return _run_dialog(_build_channel_manager_dialog, channels, default_channels, "remove", None, None)
 
 
-def open_view_channels_dialog(channels: dict, default_channels: dict):
-    """Blocking — read-only list of monitored channels."""
-    _run_dialog(_build_channel_manager_dialog, channels, default_channels, "view")
+def open_manage_channels_dialog(channels: dict, default_channels: dict, get_options, on_save):
+    """Blocking — channel list; `on_save(handle, options)` is called when a channel's settings are saved."""
+    _run_dialog(_build_channel_manager_dialog, channels, default_channels, "view", get_options, on_save)
+
+
+def open_settings_dialog(current: dict, startup: bool) -> dict | None:
+    """Blocking — returns the new settings (plus "startup": bool), or None if cancelled."""
+    return _run_dialog(_build_settings_dialog, current, startup)
 
 
 def show_live_toast(channel_name: str, stream_title: str, stream_url: str,
                     thumbnail_url: str | None = None,
                     viewers: str | None = None,
-                    start_time: str | None = None):
-    """Non-blocking. Fetches the thumbnail on a worker thread, then builds the toast on the UI thread."""
-    threading.Thread(target=_play_sound, daemon=True).start()
+                    start_time: str | None = None,
+                    badge: str = "LIVE",
+                    meta: str | None = None,
+                    sound: str = "default"):
+    """Non-blocking. `badge` is "LIVE" or "SOON"; `meta` overrides the viewers/elapsed line."""
+    threading.Thread(target=_play_sound, args=(sound,), daemon=True).start()
+    if meta is None:
+        meta = "  ·  ".join(filter(None, [_format_viewers(viewers), _format_elapsed(start_time)]))
 
     def _fetch_then_build():
         thumb = _fetch_thumbnail(thumbnail_url) if thumbnail_url else None
-        _post(lambda: _build_live_toast(channel_name, stream_title, stream_url,
-                                        viewers, start_time, thumb))
+        _post(lambda: _build_live_toast(channel_name, stream_title, stream_url, meta, thumb, badge))
 
     threading.Thread(target=_fetch_then_build, daemon=True).start()
